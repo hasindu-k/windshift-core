@@ -21,6 +21,8 @@ import (
 	"windshift/internal/models"
 )
 
+const githubRepositoryFetchPageSize = 100
+
 // Compile-time check that GitHubProvider implements the optional
 // interfaces it claims. Dropping a method on any of these here surfaces
 // as a build error rather than a runtime type-assertion miss.
@@ -293,6 +295,75 @@ func (g *GitHubProvider) TestConnection(ctx context.Context) error {
 	return g.doJSON(ctx, "GET", testURL, http.NoBody, http.StatusOK, nil)
 }
 
+func (g *GitHubProvider) searchRepositories(ctx context.Context, opts ListRepositoriesOptions) ([]Repository, error) {
+	isApp := g.appPrivateKey != nil && g.installationID != 0
+	var matches []Repository
+	for sourcePage := 1; ; sourcePage++ {
+		repos, err := g.fetchRepositoryPage(ctx, opts, isApp, sourcePage)
+		if err != nil {
+			return nil, err
+		}
+		matches = append(matches, matchingRepositories(repos, opts)...)
+		if len(repos) < githubRepositoryFetchPageSize {
+			return paginateRepositories(matches, opts.Page, opts.PerPage), nil
+		}
+	}
+}
+
+func (g *GitHubProvider) fetchRepositoryPage(ctx context.Context, opts ListRepositoriesOptions, isApp bool, page int) ([]githubRepo, error) {
+	q := url.Values{
+		"page":     {strconv.Itoa(page)},
+		"per_page": {strconv.Itoa(githubRepositoryFetchPageSize)},
+	}
+	if !isApp && opts.Visibility != "" && opts.Visibility != "all" {
+		q.Set("visibility", opts.Visibility)
+	}
+
+	if isApp {
+		var result struct {
+			Repositories []githubRepo `json:"repositories"`
+		}
+		if err := g.doJSON(ctx, "GET", g.baseURL+"/installation/repositories?"+q.Encode(), http.NoBody, http.StatusOK, &result); err != nil {
+			return nil, err
+		}
+		return result.Repositories, nil
+	}
+
+	var repos []githubRepo
+	if err := g.doJSON(ctx, "GET", g.baseURL+"/user/repos?"+q.Encode(), http.NoBody, http.StatusOK, &repos); err != nil {
+		return nil, err
+	}
+	return repos, nil
+}
+
+func matchingRepositories(repos []githubRepo, opts ListRepositoriesOptions) []Repository {
+	search := strings.ToLower(opts.Search)
+	matches := make([]Repository, 0, len(repos))
+	for _, repo := range repos {
+		if opts.Organization != "" && !strings.EqualFold(repo.Owner.Login, opts.Organization) {
+			continue
+		}
+		if strings.Contains(strings.ToLower(repo.Name), search) ||
+			strings.Contains(strings.ToLower(repo.FullName), search) ||
+			strings.Contains(strings.ToLower(repo.Description), search) {
+			matches = append(matches, repo.toRepository())
+		}
+	}
+	return matches
+}
+
+func paginateRepositories(repos []Repository, page, perPage int) []Repository {
+	start := (page - 1) * perPage
+	if start >= len(repos) {
+		return []Repository{}
+	}
+	end := start + perPage
+	if end > len(repos) {
+		end = len(repos)
+	}
+	return repos[start:end]
+}
+
 // ListRepositories lists all accessible repositories
 func (g *GitHubProvider) ListRepositories(ctx context.Context, opts ListRepositoriesOptions) ([]Repository, error) {
 	if err := g.ensureInstallationToken(ctx); err != nil {
@@ -306,6 +377,12 @@ func (g *GitHubProvider) ListRepositories(ctx context.Context, opts ListReposito
 	perPage := opts.PerPage
 	if perPage == 0 {
 		perPage = 30
+	}
+
+	if opts.Search != "" {
+		opts.Page = page
+		opts.PerPage = perPage
+		return g.searchRepositories(ctx, opts)
 	}
 
 	// GitHub App installation tokens use /installation/repositories

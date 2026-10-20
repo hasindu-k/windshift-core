@@ -85,10 +85,10 @@ type ListRepositoriesOptions struct {
 	Organization string // Filter by organization (if supported)
 	Visibility   string // public, private, all
 	Sort         string // created, updated, pushed, full_name
-	// Search restricts results server-side to repositories matching the
-	// query, for providers that support it (currently GitLab). Providers
-	// without native search ignore it and return the unfiltered page;
-	// callers narrow those client-side.
+	// Search restricts results to repositories matching the query. GitLab
+	// applies the search server-side. GitHub's accessible-repository endpoint
+	// has no search parameter, so the provider fetches repositories in batches
+	// and filters them client-side.
 	Search string
 }
 
